@@ -1,223 +1,159 @@
 #!/bin/bash
-
-# Xray Reality 安全纯净版 | 含SNI选择 + 扫码 + YAML订阅
-# fork自 nbw-dev 清理后门 | royalorly
-# 协议：VLESS + reality + xtls-rprx-vision + UDP 正常
-
 set -e
 
-echo "============================================"
-echo " Xray Reality 安装脚本 (无后门 + SNI选择)"
-echo " 仓库：https://github.com/royalorly/scripts"
-echo "============================================"
+# 三个独立随机端口
+REALITY_PORT=$(shuf -i 20000-30000 -n1)
+HY2_PORT=$(shuf -i 30001-40000 -n1)
+TUIC_PORT=$(shuf -i 40001-50000 -n1)
 
-if [ "$EUID" -ne 0 ]; then
-    echo "请用 root 运行"
-    exit 1
-fi
+UUID=$(cat /proc/sys/kernel/random/uuid)
+SERVER_IP=$(curl -s ipv4.ip.sb 2>/dev/null || curl -s ifconfig.me)
+SUB_PORT=58288
+SUB_DIR=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 16)
 
 # 安装依赖
 apt update -y
-apt install -y curl wget unzip jq openssl qrencode
+apt install -y wget unzip qrencode curl openssl -y
 
-# 安装官方 Xray
+# 安装 Xray
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
-# 生成基础参数
-UUID=$(cat /proc/sys/kernel/random/uuid)
-PORT=$(shuf -i 20000-50000 -n1)
-IP=$(curl -s --ipv4 ipv4.ip.sb)
-KEYPAIR=$(xray x25519)
-PRIVATE_KEY=$(echo "$KEYPAIR" | awk '/Private key:/{print $3}')
-PUBLIC_KEY=$(echo "$KEYPAIR" | awk '/Public key:/{print $3}')
+# 生成 Reality 密钥
+xray x25519 > /tmp/x25519
+PRIVATE_KEY=$(sed -n '2p' /tmp/x25519 | awk '{print $3}')
+PUBLIC_KEY=$(sed -n '1p' /tmp/x25519 | awk '{print $3}')
 SHORT_ID=$(openssl rand -hex 8)
-YAML_PORT=58288
 
-# ==========================================
-# SNI 选择菜单
-# ==========================================
-echo
-echo "请选择 SNI（推荐自动测速选最优）："
-echo "1) www.google.com"
-echo "2) www.cloudflare.com"
-echo "3) www.apple.com"
-echo "4) www.microsoft.com"
-echo "5) www.amazon.com"
-echo "6) 自动测速选择最优"
-read -p "输入数字 [1-6]：" sni_choice
+SNI="www.apple.com"
 
-case "$sni_choice" in
-    1) SERVER_NAME="www.google.com" ;;
-    2) SERVER_NAME="www.cloudflare.com" ;;
-    3) SERVER_NAME="www.apple.com" ;;
-    4) SERVER_NAME="www.microsoft.com" ;;
-    5) SERVER_NAME="www.amazon.com" ;;
-    6)
-        echo "正在自动测速优选 SNI..."
-        candidates=("www.google.com" "www.cloudflare.com" "www.apple.com" "www.microsoft.com" "www.amazon.com")
-        best_sni=""
-        best_time=99999
-        for domain in "${candidates[@]}"; do
-            delay=$(curl -o /dev/null -s -w "%{time_connect}\n" "https://$domain" --connect-timeout 3 || echo 99999)
-            delay_int=$(echo "$delay * 1000" | bc | cut -d'.' -f1)
-            echo "$domain 延迟：${delay_int}ms"
-            if (( delay_int < best_time )); then
-                best_time=$delay_int
-                best_sni=$domain
-            fi
-        done
-        SERVER_NAME="$best_sni"
-        echo "自动选择最优 SNI：$SERVER_NAME"
-        ;;
-    *)
-        SERVER_NAME="www.google.com"
-        echo "输入错误，默认使用 www.google.com"
-        ;;
-esac
+# 随机密码
+HY2_PASS=$(openssl rand -hex 8)
+TUIC_PASS=$(openssl rand -hex 8)
 
-DEST="${SERVER_NAME}:443"
-
-# ==========================================
-# 写入 Xray 配置（协议与原版完全一致）
-# ==========================================
-cat > /usr/local/etc/xray/config.json <<EOF
+# ==========================
+# Xray Reality
+# ==========================
+cat > /usr/local/etc/xray/config.json << EOF
 {
-  "log": {
-    "loglevel": "warning"
-  },
-  "dns": {
-    "servers": ["8.8.8.8","1.1.1.1"]
-  },
-  "routing": {
-    "domainStrategy": "IPIfNonMatch",
-    "rules": [
-      {
-        "type": "field",
-        "ip": ["geoip:private"],
-        "outboundTag": "block"
-      }
-    ]
-  },
+  "log": {"loglevel": "warning"},
   "inbounds": [
     {
-      "listen": "0.0.0.0",
-      "port": $PORT,
+      "port": $REALITY_PORT,
       "protocol": "vless",
       "settings": {
-        "clients": [
-          {
-            "id": "$UUID",
-            "flow": "xtls-rprx-vision"
-          }
-        ],
+        "clients": [{"id": "$UUID"}],
         "decryption": "none"
       },
       "streamSettings": {
         "network": "tcp",
         "security": "reality",
         "realitySettings": {
-          "show": false,
-          "dest": "$DEST",
-          "xver": 0,
-          "serverNames": ["$SERVER_NAME"],
+          "dest": "www.apple.com:443",
+          "serverNames": ["www.apple.com"],
           "privateKey": "$PRIVATE_KEY",
-          "maxTimeDiff": 0,
           "shortIds": ["$SHORT_ID"]
         }
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http","tls"]
       }
     }
   ],
-  "outbounds": [
-    {
-      "protocol": "freedom",
-      "tag": "direct",
-      "settings": {
-        "domainStrategy": "UseIPv4"
-      }
-    },
-    {
-      "protocol": "blackhole",
-      "tag": "block"
-    }
-  ]
+  "outbounds": [{"protocol": "freedom"}]
 }
 EOF
 
-# 重启服务
-systemctl daemon-reload
-systemctl enable xray
-systemctl restart xray
+# ==========================
+# Hysteria2
+# ==========================
+bash -c "$(curl -fsSL https://get.hy2.sh/)"
 
-# 生成分享链接
-LINK="vless://$UUID@$IP:$PORT?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$SERVER_NAME&pbk=$PUBLIC_KEY&sid=$SHORT_ID&type=tcp#Reality_$IP"
-
-# 生成 Clash 订阅
-YAML_FILE="/var/www/html/reality.yaml"
-mkdir -p /var/www/html
-cat > $YAML_FILE <<EOF
-port: 7890
-socks-port: 7891
-allow-lan: false
-mode: rule
-log-level: info
-external-controller: 127.0.0.1:9090
-dns:
-  enable: true
-  listen: 0.0.0.1:53
-  default-nameserver: [8.8.8.8, 1.1.1.1]
-  nameserver: [8.8.8.8, 1.1.1.1]
-proxies:
-  - name: Reality_$IP
-    type: vless
-    server: $IP
-    port: $PORT
-    uuid: $UUID
-    flow: xtls-rprx-vision
-    tls: false
-    reality: true
-    server-name: $SERVER_NAME
-    public-key: $PUBLIC_KEY
-    short-id: $SHORT_ID
-    network: tcp
-proxy-groups:
-  - name: Proxy
-    type: select
-    proxies: [Reality_$IP]
-rules:
-  - MATCH,Proxy
+cat > /etc/hysteria/config.yaml << EOF
+listen: 0.0.0.0:$HY2_PORT
+tls:
+  cert: /dev/null
+  key: /dev/null
+  alpn: [h3]
+auth:
+  type: password
+  password: "$HY2_PASS"
+masquerade:
+  type: proxy
+  proxy:
+    url: https://www.apple.com
+    rewriteHost: true
 EOF
 
-# 启动订阅服务
-if ! command -v python3 &> /dev/null; then
-    apt install python3 -y
-fi
-cd /var/www/html && nohup python3 -m http.server $YAML_PORT > /dev/null 2>&1 &
-sleep 1
-SUB_URL="http://$IP:$YAML_PORT/reality.yaml"
+# ==========================
+# TUIC
+# ==========================
+wget -O /usr/local/bin/tuic-server https://github.com/EAimTY/tuic/releases/latest/download/tuic-server-linux-amd64
+chmod +x /usr/local/bin/tuic-server
 
-# 展示结果
+cat > /etc/tuic.json << EOF
+{
+  "server": "0.0.0.0:$TUIC_PORT",
+  "users": [{"uuid": "$UUID", "password": "$TUIC_PASS"}],
+  "certificate": "/dev/null",
+  "private_key": "/dev/null",
+  "alpn": ["h3"],
+  "congestion_control": "bbr"
+}
+EOF
+
+cat > /etc/systemd/system/tuic.service << EOF
+[Unit]
+Description=TUIC Server
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/tuic-server -c /etc/tuic.json
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 启动服务
+systemctl daemon-reload
+systemctl enable --now xray
+systemctl enable --now hysteria
+systemctl enable --now tuic
+
+# ==========================
+# 输出节点 + 二维码
+# ==========================
+clear
+echo "========================================"
+echo "          三合一节点安装完成"
+echo "     Reality + Hysteria2 + TUIC"
+echo "========================================"
 echo
-echo "================= 安装完成 =================="
-echo "IP：$IP"
-echo "端口：$PORT"
-echo "UUID：$UUID"
-echo "公钥：$PUBLIC_KEY"
-echo "Short ID：$SHORT_ID"
-echo "SNI：$SERVER_NAME"
-echo "流控：xtls-rprx-vision"
-echo "============================================"
+
+# 1 Reality
+echo "【1】VLESS Reality"
+LINK1="vless://$UUID@$SERVER_IP:$REALITY_PORT?security=reality&sni=$SNI&pbk=$PUBLIC_KEY&sid=$SHORT_ID&type=tcp&flow=xtls-rprx-vision#JP_Reality"
+echo "$LINK1"
 echo
-echo "vless 链接："
-echo "$LINK"
+qrencode -t ansiutf8 "$LINK1"
 echo
-echo "Clash 订阅地址："
-echo "$SUB_URL"
+
+# 2 Hysteria2
+echo "【2】Hysteria2"
+LINK2="hysteria2://$HY2_PASS@$SERVER_IP:$HY2_PORT?insecure=1&sni=$SNI&alpn=h3#JP_Hysteria2"
+echo "$LINK2"
 echo
-echo "📱 扫码添加："
-qrencode -t ansiutf8 "$LINK"
+qrencode -t ansiutf8 "$LINK2"
 echo
-echo "============================================"
+
+# 3 TUIC
+echo "【3】TUIC"
+LINK3="tuic://$UUID:$TUIC_PASS@$SERVER_IP:$TUIC_PORT?insecure=1&sni=$SNI&alpn=h3#JP_TUIC"
+echo "$LINK3"
+echo
+qrencode -t ansiutf8 "$LINK3"
+echo
+
+# 订阅地址（YAML 格式通用）
+echo "【订阅地址】"
+echo "http://$SERVER_IP:$SUB_PORT/$SUB_DIR"
+echo "========================================"
+echo "安全组放行：TCP 20000-50000 / UDP 20000-50000"
+echo "========================================"
