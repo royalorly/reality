@@ -15,6 +15,14 @@ SUB_DIR=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 16)
 apt update -y
 apt install -y wget unzip qrencode curl openssl -y
 
+# 自动检测系统架构（兼容x86/ARM）
+ARCH=$(uname -m)
+if [ "$ARCH" = "aarch64" ]; then
+    TUIC_ARCH="aarch64"
+else
+    TUIC_ARCH="x86_64"
+fi
+
 # 安装 Xray
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
@@ -61,7 +69,7 @@ cat > /usr/local/etc/xray/config.json << EOF
 EOF
 
 # ==========================
-# Hysteria2
+# Hysteria2（自动适配架构）
 # ==========================
 bash -c "$(curl -fsSL https://get.hy2.sh/)"
 
@@ -82,9 +90,11 @@ masquerade:
 EOF
 
 # ==========================
-# TUIC
+# TUIC（修复架构问题，自动适配x86/ARM）
 # ==========================
-wget -O /usr/local/bin/tuic-server https://github.com/EAimTY/tuic/releases/latest/download/tuic-server-linux-amd64
+# 固定版本v1.0.0，避免latest重定向404
+TUIC_VER="1.0.0"
+wget -O /usr/local/bin/tuic-server https://github.com/EAimTY/tuic/releases/download/tuic-server-$TUIC_VER/tuic-server-$TUIC_VER-linux-$TUIC_ARCH
 chmod +x /usr/local/bin/tuic-server
 
 cat > /etc/tuic.json << EOF
@@ -151,7 +161,7 @@ echo
 qrencode -t ansiutf8 "$LINK3"
 echo
 
-# 订阅地址（YAML 格式通用）
+# 订阅地址
 echo "【订阅地址】"
 echo "http://$SERVER_IP:$SUB_PORT/$SUB_DIR"
 echo "========================================"
