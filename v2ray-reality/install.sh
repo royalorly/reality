@@ -1,13 +1,13 @@
 #!/bin/bash
 
-# Xray Reality 安全纯净版 | 含SNI选择 + 扫码 + YAML订阅
+# Xray Reality 安全纯净版 | 含SNI选择 + 扫码 + YAML订阅 + BBR加速
 # fork自 nbw-dev 清理后门 | royalorly
 # 协议：VLESS + reality + xtls-rprx-vision + UDP 正常
 
 set -e
 
 echo "============================================"
-echo " Xray Reality 安装脚本 (无后门 + SNI选择)"
+echo " Xray Reality 安装脚本 (无后门 + SNI选择 + BBR)"
 echo " 仓库：https://github.com/royalorly/scripts"
 echo "============================================"
 
@@ -78,7 +78,7 @@ esac
 DEST="${SERVER_NAME}:443"
 
 # ==========================================
-# 写入 Xray 配置（协议与原版完全一致）
+# 写入 Xray 配置
 # ==========================================
 cat > /usr/local/etc/xray/config.json <<EOF
 {
@@ -147,7 +147,28 @@ cat > /usr/local/etc/xray/config.json <<EOF
 }
 EOF
 
-# 重启服务
+# ==========================================
+# 开启 BBR 拥塞控制（无额外依赖）
+# ==========================================
+echo
+echo "正在启用 BBR 加速..."
+cat >> /etc/sysctl.conf << EOF
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+sysctl -p > /dev/null 2>&1
+
+# 验证 BBR 是否开启
+bbr_status=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
+if [ "$bbr_status" = "bbr" ]; then
+    echo "BBR 启动成功 ✅"
+else
+    echo "BBR 启动失败，请重启服务器后生效"
+fi
+
+# ==========================================
+# 重启 Xray 服务
+# ==========================================
 systemctl daemon-reload
 systemctl enable xray
 systemctl restart xray
@@ -209,6 +230,7 @@ echo "公钥：$PUBLIC_KEY"
 echo "Short ID：$SHORT_ID"
 echo "SNI：$SERVER_NAME"
 echo "流控：xtls-rprx-vision"
+echo "加速：BBR 已启用"
 echo "============================================"
 echo
 echo "vless 链接："
